@@ -31,7 +31,7 @@ described below:
 
    This callback is called when the socket goes to the *CONNECTED*
    state, that is when the connection to the remote peer is
-   accepted. `sock` is the socket for which the connection has been
+   established. `sock` is the socket for which the connection has been
    established.
 
 4. `on_error(cb, ctx, sock, error_code)`
