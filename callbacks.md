@@ -46,7 +46,7 @@ described below:
    read. `sock` is the socket from which some data has arrived and
    `data` is what has arrived.
 
-6. `on_overhead_statistics(cb, ctx, sock, send, length, type)
+6. `on_overhead_statistics(cb, ctx, sock, send, length, type)`
 
    This callback is called whenever some overhead bandwidth has been
    used by the protocol. `sock` is the connection for which the stats
