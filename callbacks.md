@@ -113,12 +113,12 @@ described below:
    Gives you a chance to set the current time. The return value should
    be the number of microseconds passed since epoch.
 
-13. `utp_get_random(cb, ctx, sock)`
+13. `get_random(cb, ctx, sock)`
 
    Gives you a chance to return a random number for use by libutp. The
    return value should be a random 32-bit integer.
 
-14. `utp_log(cb, ctx, sock, msg)`
+14. `log(cb, ctx, sock, msg)`
 
    This callback is called whenever there is a log message
    available. `sock` is the socket for which the message is being
@@ -127,7 +127,7 @@ described below:
    The amount of messages being logged depends on the options set by
    calling the `utp_context_set_option` function.
 
-15. `utp_sendto(cb, ctx, sock, data, addr, flags)`
+15. `sendto(cb, ctx, sock, data, addr, flags)`
 
    This callback is called whenever a UDP datagram needs to be
    sent. `sock` is the socket that is transmitting. `data` is the data
