@@ -10,8 +10,10 @@ library loader. Something like this will do the trick on Ubuntu:
     $ make
     $ sudo install libutp.so /usr/lib/
 
-After this, you can use pyutp almost the same way you can use
-libutp. This is currently a very thin Python wrapper around most of
-libutp. I'm hoping to make it more complete and more Pythonic soon.
+After this, you can use pyutp almost the same way you can use libutp
+except the callback functions receive their relevant arguments instead
+of one monolithic struct. All in all though, this is currently a very
+thin Python wrapper around most of libutp. I'm hoping to make it more
+complete and more Pythonic soon.
 
  [1]: https://github.com/bittorrent/libutp
