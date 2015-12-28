@@ -4,7 +4,7 @@ import select
 from ctypes import cdll, c_int, c_void_p, c_uint, c_uint32, c_uint64, c_size_t, c_char, c_char_p, POINTER, CFUNCTYPE
 from sockaddr import to_sockaddr, from_sockaddr, sockaddr_in
 
-# callback names
+# callbacks
 UTP_ON_FIREWALL = 0
 UTP_ON_ACCEPT = 1
 UTP_ON_CONNECT = 2
@@ -22,11 +22,13 @@ UTP_GET_RANDOM = 13
 UTP_LOG = 14
 UTP_SENDTO = 15
 
+# states
 UTP_STATE_CONNECT = 1
 UTP_STATE_WRITABLE = 2
 UTP_STATE_EOF = 3
 UTP_STATE_DESTROYING = 4
 
+# options
 UTP_LOG_NORMAL = 16
 UTP_LOG_MTU = 17
 UTP_LOG_DEBUG = 18
@@ -34,10 +36,10 @@ UTP_SNDBUF = 19
 UTP_RCVBUF = 20
 UTP_TARGET_DELAY = 21
 
-class utp_context(ctypes.Structure):
+class UtpContext(ctypes.Structure):
     pass
 
-class utp_socket(ctypes.Structure):
+class UtpSocket(ctypes.Structure):
     pass
 
 class UtpCallbackArgs(ctypes.Structure):
@@ -51,8 +53,8 @@ class UtpCallbackArgs(ctypes.Structure):
         _fields_ = [('address_len', c_uint32),
                     ('type', c_int)]
     _anonymous_ = ('anon1', 'anon2')
-    _fields_ = [('context', POINTER(utp_context)),
-                ('socket', POINTER(utp_socket)),
+    _fields_ = [('context', POINTER(Context)),
+                ('socket', POINTER(Socket)),
                 ('len', c_size_t),
                 ('flags', c_uint32),
                 ('callback_type', c_int),
@@ -119,7 +121,8 @@ def utp_init(version):
 def utp_destroy(ctx):
     libutp.utp_destroy(ctx)
 
-# void utp_set_callback(utp_context *ctx, int callback_type, utp_callback_t *proc);
+# void utp_set_callback(utp_context *ctx, int callback_type,
+#                       utp_callback_t *proc);
 def utp_set_callback(ctx, callback_type, func):
     user_callbacks[callback_type] = func
     libutp.utp_set_callback(ctx, callback_type, utp_callback)
@@ -128,7 +131,8 @@ def utp_set_callback(ctx, callback_type, func):
 def utp_create_socket(ctx):
     return libutp.utp_create_socket(ctx)
 
-# int utp_process_udp(utp_context *ctx, const byte *buf, size_t len, const struct sockaddr *to, socklen_t tolen);
+# int utp_process_udp(utp_context *ctx, const byte *buf, size_t len,
+#                     const struct sockaddr *to, socklen_t tolen);
 def utp_process_udp(ctx, data, addr):
     addr, addrlen = to_sockaddr(socket.AF_INET, addr)
     return libutp.utp_process_udp(ctx,
