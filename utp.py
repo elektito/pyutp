@@ -83,8 +83,11 @@ def utp_callback(a):
     else:
         addr = None
 
-    if cb in [UTP_ON_READ, UTP_LOG, UTP_SENDTO]:
+    if cb in [UTP_ON_READ, UTP_SENDTO]:
         data = ctypes.string_at(args.buf, args.len)
+    elif cb == UTP_LOG:
+        # zero terminated string
+        data = ctypes.string_at(args.buf)
     else:
         data = None
 
