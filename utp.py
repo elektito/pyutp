@@ -53,8 +53,8 @@ class UtpCallbackArgs(ctypes.Structure):
         _fields_ = [('address_len', c_uint32),
                     ('type', c_int)]
     _anonymous_ = ('anon1', 'anon2')
-    _fields_ = [('context', POINTER(Context)),
-                ('socket', POINTER(Socket)),
+    _fields_ = [('context', POINTER(UtpContext)),
+                ('socket', POINTER(UtpSocket)),
                 ('len', c_size_t),
                 ('flags', c_uint32),
                 ('callback_type', c_int),
