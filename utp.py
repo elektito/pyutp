@@ -1,6 +1,5 @@
 import ctypes
 import socket
-import select
 from ctypes import cdll, c_int, c_void_p, c_uint, c_uint32, c_uint64, c_size_t, c_char, c_char_p, POINTER, CFUNCTYPE
 from sockaddr import to_sockaddr, from_sockaddr, sockaddr_in
 
@@ -167,87 +166,3 @@ def utp_read_drained(sock):
 # void utp_close(utp_socket *s);
 def utp_close(sock):
     libutp.utp_close(sock)
-
-def main():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    fd = s.fileno()
-    s.setblocking(0)
-    s.bind(('127.0.0.1', 5002))
-
-    def sendto_cb(cb, ctx, sock, data, addr, flags):
-        addr, port = addr
-        print('sending {} byte(s) to {}:{}'.format(len(data), addr, port))
-        s.sendto(data, (addr, port))
-        return 0
-
-    def state_change_cb(cb, ctx, sock, state):
-        msg = {
-            UTP_STATE_CONNECT: '=> connect',
-            UTP_STATE_WRITABLE: '=> writable',
-            UTP_STATE_EOF: '=> eof',
-            UTP_STATE_DESTROYING: '=> destroying'
-        }[state]
-        print(msg)
-        if state == UTP_STATE_CONNECT:
-            utp_write(sock, b'foobar\n')
-        return 0
-
-    def error_cb(cb, ctx, sock, error_code):
-        print('error:', error_code)
-        return 0
-
-    def read_cb(cb, ctx, sock, data):
-        print('read:', data)
-        utp_read_drained(sock)
-        return 0
-
-    def firewall_cb(cb, ctx, addr):
-        print('on firewall:', addr)
-        return 0
-
-    def log_cb(cb, ctx, sock, msg):
-        print('log:', msg)
-        return 0
-
-    ctx = utp_init(2)
-
-    utp_set_callback(ctx, UTP_SENDTO, sendto_cb)
-    utp_set_callback(ctx, UTP_LOG, log_cb)
-    utp_set_callback(ctx, UTP_ON_STATE_CHANGE, state_change_cb)
-    utp_set_callback(ctx, UTP_ON_ERROR, error_cb)
-    utp_set_callback(ctx, UTP_ON_READ, read_cb)
-    utp_set_callback(ctx, UTP_ON_FIREWALL, firewall_cb)
-
-    #utp_context_set_option(ctx, UTP_LOG_NORMAL, 1)
-    #utp_context_set_option(ctx, UTP_LOG_DEBUG, 1)
-    #utp_context_set_option(ctx, UTP_LOG_MTU, 1)
-
-    sock = utp_create_socket(ctx);
-    ret = utp_connect(sock, ('127.0.0.1', 5001))
-
-    poll = select.poll()
-    poll.register(fd, select.POLLIN)
-    while True:
-        results = poll.poll(100)
-        if len(results) > 0:
-            drained = False
-            while not drained:
-                try:
-                    data, addr = s.recvfrom(1500)
-                except socket.error as e:
-                    if e.errno == socket.EAGAIN or e.errno == socket.EWOULDBLOCK:
-                        print('issuing deferred acks')
-                        utp_issue_deferred_acks(ctx)
-                        drained = True
-                    else:
-                        print(e)
-                        exit(1)
-                utp_process_udp(ctx, data, addr)
-
-        utp_check_timeouts(ctx)
-
-    utp_close(sock)
-    utp_destroy(ctx)
-
-if __name__ == '__main__':
-    main()
