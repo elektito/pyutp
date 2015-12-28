@@ -63,6 +63,54 @@ class UtpCallbackArgs(ctypes.Structure):
 
 libutp = cdll.LoadLibrary('libutp.so')
 
+CBFUNC = CFUNCTYPE(c_uint64, POINTER(UtpCallbackArgs))
+user_callbacks = {}
+
+@CBFUNC
+def utp_callback(a):
+    args = a.contents
+
+    func = user_callbacks[args.callback_type]
+
+    cb = args.callback_type
+    ctx = args.context
+    sock = args.socket
+
+    if cb in [UTP_ON_FIREWALL, UTP_ON_ACCEPT, UTP_GET_UDP_MTU,
+              UTP_GET_UDP_OVERHEAD, UTP_SENDTO]:
+        addr = from_sockaddr(args.address.contents)
+    else:
+        addr = None
+
+    if cb in [UTP_ON_READ, UTP_LOG, UTP_SENDTO]:
+        data = ctypes.string_at(args.buf, args.len)
+    else:
+        data = None
+
+    args = {
+        UTP_ON_FIREWALL: (cb, ctx, addr),
+        UTP_ON_ACCEPT: (cb, ctx, sock, addr),
+        UTP_ON_CONNECT: (cb, ctx, sock),
+        UTP_ON_ERROR: (cb, ctx, sock, args.error_code),
+        UTP_ON_READ: (cb, ctx, sock, data),
+        UTP_ON_OVERHEAD_STATISTICS: (cb, ctx, sock,
+                                     args.send, args.len, args.type),
+        UTP_ON_STATE_CHANGE: (cb, ctx, sock, args.state),
+        UTP_GET_READ_BUFFER_SIZE: (cb, ctx, sock),
+        UTP_ON_DELAY_SAMPLE: (cb, ctx, sock),
+        UTP_GET_UDP_MTU: (cb, ctx, sock, addr),
+        UTP_GET_UDP_OVERHEAD: (cb, ctx, sock, addr),
+        UTP_GET_MILLISECONDS: (cb, ctx, sock),
+        UTP_GET_MICROSECONDS: (cb, ctx, sock),
+        UTP_GET_RANDOM: (cb, ctx, sock),
+        UTP_LOG: (cb, ctx, sock, data),
+        UTP_SENDTO: (cb, ctx, sock, data, addr, args.flags)
+    }[args.callback_type]
+
+    ret = func(*args)
+
+    return ret
+
 # utp_context *utp_init(int version);
 def utp_init(version):
     return libutp.utp_init(version)
@@ -71,10 +119,10 @@ def utp_init(version):
 def utp_destroy(ctx):
     libutp.utp_destroy(ctx)
 
-# void utp_set_callback(utp_context *ctx, int callback_name, utp_callback_t *proc);
-CBFUNC = CFUNCTYPE(c_uint64, POINTER(UtpCallbackArgs))
-def utp_set_callback(ctx, callback_name, func):
-    libutp.utp_set_callback(ctx, callback_name, func)
+# void utp_set_callback(utp_context *ctx, int callback_type, utp_callback_t *proc);
+def utp_set_callback(ctx, callback_type, func):
+    user_callbacks[callback_type] = func
+    libutp.utp_set_callback(ctx, callback_type, utp_callback)
 
 # utp_socket *utp_create_socket(utp_context *ctx);
 def utp_create_socket(ctx):
@@ -122,66 +170,49 @@ def main():
     s.setblocking(0)
     s.bind(('127.0.0.1', 5002))
 
-    def sendto_cb(a):
-        args = a.contents
-        addr, port = from_sockaddr(args.address.contents)
-        data = ctypes.string_at(args.buf, args.len)
+    def sendto_cb(cb, ctx, sock, data, addr, flags):
+        addr, port = addr
         print('sending {} byte(s) to {}:{}'.format(len(data), addr, port))
         s.sendto(data, (addr, port))
         return 0
 
-    def state_change_cb(a):
-        args = a.contents
+    def state_change_cb(cb, ctx, sock, state):
         msg = {
             UTP_STATE_CONNECT: '=> connect',
             UTP_STATE_WRITABLE: '=> writable',
             UTP_STATE_EOF: '=> eof',
             UTP_STATE_DESTROYING: '=> destroying'
-        }[args.state]
+        }[state]
         print(msg)
-        if args.state == UTP_STATE_CONNECT:
-            utp_write(args.socket, b'foobar\n')
+        if state == UTP_STATE_CONNECT:
+            utp_write(sock, b'foobar\n')
         return 0
 
-    def error_cb(a):
-        args = a.contents
-
-        print('error:', args.error_code)
+    def error_cb(cb, ctx, sock, error_code):
+        print('error:', error_code)
         return 0
 
-    def read_cb(a):
-        args = a.contents
-        print('read:', ctypes.string_at(args.buf, args.len))
-        utp_read_drained(args.socket)
-
+    def read_cb(cb, ctx, sock, data):
+        print('read:', data)
+        utp_read_drained(sock)
         return 0
 
-    def firewall_cb(a):
-        print('on firewall')
-        args = a.contents
-
+    def firewall_cb(cb, ctx, addr):
+        print('on firewall:', addr)
         return 0
 
-    def log_cb(a):
-        args = a.contents
-        print('log:', ctypes.string_at(args.buf))
-        utp_read_drained(args.socket)
+    def log_cb(cb, ctx, sock, msg):
+        print('log:', msg)
         return 0
 
     ctx = utp_init(2)
 
-    sendto_cb_proc = CBFUNC(sendto_cb)
-    state_change_cb_proc = CBFUNC(state_change_cb)
-    error_cb_proc = CBFUNC(error_cb)
-    read_cb_proc = CBFUNC(read_cb)
-    firewall_cb_proc = CBFUNC(firewall_cb)
-    log_cb_proc = CBFUNC(log_cb)
-    utp_set_callback(ctx, UTP_SENDTO, sendto_cb_proc)
-    utp_set_callback(ctx, UTP_LOG, log_cb_proc)
-    utp_set_callback(ctx, UTP_ON_STATE_CHANGE, state_change_cb_proc)
-    utp_set_callback(ctx, UTP_ON_ERROR, error_cb_proc)
-    utp_set_callback(ctx, UTP_ON_READ, read_cb_proc)
-    utp_set_callback(ctx, UTP_ON_FIREWALL, firewall_cb_proc)
+    utp_set_callback(ctx, UTP_SENDTO, sendto_cb)
+    utp_set_callback(ctx, UTP_LOG, log_cb)
+    utp_set_callback(ctx, UTP_ON_STATE_CHANGE, state_change_cb)
+    utp_set_callback(ctx, UTP_ON_ERROR, error_cb)
+    utp_set_callback(ctx, UTP_ON_READ, read_cb)
+    utp_set_callback(ctx, UTP_ON_FIREWALL, firewall_cb)
 
     #utp_context_set_option(ctx, UTP_LOG_NORMAL, 1)
     #utp_context_set_option(ctx, UTP_LOG_DEBUG, 1)
