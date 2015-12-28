@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import socket
 import select
 import sys
@@ -8,13 +10,14 @@ import utp
 
 keep_running = True
 writable = False
-
+listen_mode = False
 logger = None
-backlog = b''
 s = None
 sock_fd = None
 ctx = None
 sock = None
+exit_code = 0
+data_buffer = b''
 
 def sendto_cb(cb, ctx, sock, data, addr, flags):
     addr, port = addr
@@ -22,8 +25,8 @@ def sendto_cb(cb, ctx, sock, data, addr, flags):
     s.sendto(data, (addr, port))
     return 0
 
-def state_change_cb(cb, ctx, sock, state):
-    global keep_running, writable, backlog
+def state_change_cb(cb, ctx, the_sock, state):
+    global keep_running, writable, sock
 
     msg = {
         utp.UTP_STATE_CONNECT: 'CONNECT',
@@ -35,17 +38,26 @@ def state_change_cb(cb, ctx, sock, state):
 
     if state == utp.UTP_STATE_EOF:
         keep_running = False
+        utp.utp_close(sock)
+        sock = None
     elif state == utp.UTP_STATE_WRITABLE or state == utp.UTP_STATE_CONNECT:
         writable = True
-
-        if backlog:
-            write_data(backlog)
-            backlog = b''
+        write_data()
+    elif state == utp.UTP_STATE_DESTROYING:
+        if sock:
+            utp.utp_close(sock)
+        sock = None
+        keep_running = False
 
     return 0
 
 def error_cb(cb, ctx, sock, error_code):
+    global keep_running
+
     logger.error('UTP error: {}'.format(error_code))
+    utp.utp_close(sock)
+    keep_running = False
+    exit_code = 1
     return 0
 
 def read_cb(cb, ctx, sock, data):
@@ -54,30 +66,54 @@ def read_cb(cb, ctx, sock, data):
     return 0
 
 def firewall_cb(cb, ctx, addr):
-    logger.debug('On firewall: {}:{}'.format(addr[0], addr[1]))
+    global sock
+
+    if not listen_mode:
+        logger.info(
+            'Firewalling unexpected inbound connection in non-listen mode.')
+        return 1
+
+    if sock:
+        logger.info('Firewalling second inbound connection.')
+        return 1
+
+    logger.debug('Firewall allowing inbound connection.')
+    return 0
+
+def accept_cb(cb, ctx, new_sock, addr):
+    global sock
+
+    assert not sock
+    sock = new_sock
+    logger.info('Accepted inbound connection.')
+    write_data()
     return 0
 
 def log_cb(cb, ctx, sock, msg):
     logger.debug('UTP log: {}'.format(msg.decode()))
     return 0
 
-def write_data(data):
-    global backlog
-    if not writable:
-        logger.warning('Socket not writable. Buffering data for later.')
-        backlog += data
+def write_data():
+    global keep_running, sock, data_buffer
+    if not writable and not (listen_mode and sock):
+        logger.warning('Socket not writable.')
         return
 
     sent = 0
-    while sent < len(data):
-        sent = utp.utp_write(sock, data)
+    while sent < len(data_buffer):
+        sent = utp.utp_write(sock, data_buffer)
         if sent == 0:
             print('Socket no longer writable.')
+            keep_running = False
+            if sock:
+                utp.utp_close(sock)
+            sock = None
+            exit_code = 0
             return
-        data = data[sent:]
+        data_buffer = data_buffer[sent:]
 
 def network_loop():
-    global keep_running
+    global keep_running, data_buffer
 
     poll = select.poll()
     poll.register(sock_fd, select.POLLIN)
@@ -89,7 +125,7 @@ def network_loop():
                 drained = False
                 while not drained:
                     try:
-                        data, addr = s.recvfrom(1500)
+                        data, addr = s.recvfrom(1500, socket.MSG_DONTWAIT)
                     except socket.error as e:
                         if e.errno == socket.EAGAIN or e.errno == socket.EWOULDBLOCK:
                             logger.debug('Issuing deferred acks.')
@@ -98,7 +134,8 @@ def network_loop():
                         else:
                             logger.error(e)
                             exit(1)
-                    utp.utp_process_udp(ctx, data, addr)
+                    else:
+                        utp.utp_process_udp(ctx, data, addr)
             elif fd == sys.stdin.fileno():
                 data = os.read(sys.stdin.fileno(), 2000)
                 if data == b'':
@@ -107,12 +144,13 @@ def network_loop():
                     os.close(sys.stdin.fileno())
                     keep_running = False
                 else:
-                    write_data(data)
+                    data_buffer += data
+                    write_data()
 
         utp.utp_check_timeouts(ctx)
 
 def main():
-    global s, sock_fd, ctx, sock, logger
+    global s, sock_fd, ctx, sock, logger, listen_mode, exit_code
 
     parser = argparse.ArgumentParser(
         description='netcat-like utility using uTP as the transport protocol.')
@@ -149,8 +187,7 @@ def main():
         exit(1)
 
     if args.listen:
-        print('Listening mode not supported, yet.')
-        exit(1)
+        listen_mode = True
 
     if args.debug:
         args.log_level = 'debug'
@@ -184,7 +221,10 @@ def main():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock_fd = s.fileno()
     s.setblocking(0)
-    s.bind((args.bind_address, 0))
+    if listen_mode:
+        s.bind((args.bind_address, args.listen))
+    else:
+        s.bind((args.bind_address, 0))
 
     ctx = utp.utp_init(2)
 
@@ -194,22 +234,32 @@ def main():
     utp.utp_set_callback(ctx, utp.UTP_ON_ERROR, error_cb)
     utp.utp_set_callback(ctx, utp.UTP_ON_READ, read_cb)
     utp.utp_set_callback(ctx, utp.UTP_ON_FIREWALL, firewall_cb)
+    utp.utp_set_callback(ctx, utp.UTP_ON_ACCEPT, accept_cb)
 
     if args.debug:
         utp.utp_context_set_option(ctx, utp.UTP_LOG_NORMAL, 1)
         utp.utp_context_set_option(ctx, utp.UTP_LOG_DEBUG, 1)
         utp.utp_context_set_option(ctx, utp.UTP_LOG_MTU, 1)
 
-    sock = utp.utp_create_socket(ctx);
-    ret = utp.utp_connect(sock, (args.dest_host, args.dest_port))
+    if not listen_mode:
+        sock = utp.utp_create_socket(ctx);
+        ret = utp.utp_connect(sock, (args.dest_host, args.dest_port))
 
     try:
         network_loop()
     except KeyboardInterrupt:
         print()
+        if sock:
+            utp.utp_close(sock)
+            sock = None
 
-    utp.utp_close(sock)
+    if data_buffer != b'':
+        logger.warning('Send buffer not empty.')
+        exit_code = 1
+
     utp.utp_destroy(ctx)
+
+    exit(exit_code)
 
 if __name__ == '__main__':
     main()
