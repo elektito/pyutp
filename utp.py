@@ -109,6 +109,12 @@ def utp_callback(a):
     }[args.callback_type]
 
     ret = func(*args)
+    orig_type = type(ret)
+    try:
+        ret = int(ret)
+    except TypeError:
+        raise RuntimeError('UTP callback should return an integer not {}.'
+                           .format(orig_type))
 
     return ret
 
