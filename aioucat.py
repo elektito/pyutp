@@ -6,6 +6,7 @@ keep_running = False
 class Proto(asyncio.Protocol):
     def __init__(self, is_client):
         self.is_client = is_client
+        self.closed = False
 
     def connection_made(self, transport):
         print('conn made!')
@@ -15,6 +16,7 @@ class Proto(asyncio.Protocol):
 
     def connection_lost(self, exc):
         print('conn lost!')
+        self.closed = True
 
     def data_received(self, data):
         print('data:', data)
@@ -28,7 +30,10 @@ async def run_client(loop):
     t, p = await aioutp.create_connection(lambda: Proto(True), '127.0.0.1', 5000)
     while keep_running:
         await asyncio.sleep(0.1)
-    t.close()
+        if p.closed:
+            break
+    else:
+        t.close()
     loop.stop()
 
 async def run_server(loop):
@@ -37,6 +42,7 @@ async def run_server(loop):
     while keep_running:
         await asyncio.sleep(0.1)
     server.close()
+    await server.wait_closed()
     loop.stop()
 
 def main():

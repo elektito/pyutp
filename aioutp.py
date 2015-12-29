@@ -4,7 +4,7 @@ import utp
 from collections import deque
 
 class UtpTransport(asyncio.Transport):
-    def __init__(self, loop, protocol, host, port, local_addr=None, sock=None, ctx=None):
+    def __init__(self, loop, protocol, host, port, local_addr=None, sock=None, ctx=None, server=None):
         self._loop = loop
         self._protocol = protocol
         self._peername = (host, port)
@@ -19,7 +19,7 @@ class UtpTransport(asyncio.Transport):
         self.__send_buf = deque()
 
         if sock is None:
-            self.__external_sock = False
+            self.__server = None
             self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._udp_sock.setblocking(0)
             self._udp_sock_fd = self._udp_sock.fileno()
@@ -46,7 +46,9 @@ class UtpTransport(asyncio.Transport):
         else:
             self.__sock = sock
             self.__ctx = ctx
-            self.__external_sock = True
+            self.__server = server
+
+        self.closed = asyncio.Event()
 
     def __sendto_cb(self, cb, ctx, sock, data, addr, flags):
         self.__send_buf.append(data)
@@ -59,13 +61,19 @@ class UtpTransport(asyncio.Transport):
             self.__writable = True
             self._loop.call_soon(self._protocol.connection_made, self)
 
-            self._loop.call_later(1, self.__check_for_timeouts)
+            self._loop.call_later(0.5, self.__check_for_timeouts)
         elif state == utp.UTP_STATE_EOF:
             self._loop.call_soon(self._protocol.eof_received)
             self.close()
         elif state == utp.UTP_STATE_DESTROYING:
             self.__closing = False
             self.__closed = True
+            self.closed.set()
+            if self.__server:
+                self.__server._transport_closed(self)
+            else:
+                self._loop.remove_reader(self._udp_sock_fd)
+                utp.utp_destroy(self.__ctx)
         else:
             raise RuntimeError('Encountered unknown UTP state: {}', state)
 
@@ -107,15 +115,13 @@ class UtpTransport(asyncio.Transport):
             return
 
         utp.utp_check_timeouts(self.__ctx)
-        self._loop.call_later(1, self.__check_for_timeouts)
+        self._loop.call_later(0.5, self.__check_for_timeouts)
 
     def close(self):
         self.__closing = True
         utp.utp_close(self.__sock)
         self._loop.call_soon(self._protocol.connection_lost,
                              self.__close_exception)
-        if not self.__external_sock:
-            self._loop.remove_reader(self._udp_sock_fd)
 
     def is_closing(self):
         return self.__closing
@@ -153,6 +159,9 @@ class UtpTransport(asyncio.Transport):
         self._loop.call_soon(self._protocol.connection_lost, None)
         self.closed = False
 
+    async def wait_closed(self):
+        await self.closed.wait()
+
 class UtpServer:
     def __init__(self, proto_factory, loop, bind_host, bind_port):
         self.transports = []
@@ -182,8 +191,10 @@ class UtpServer:
 
         self.__writing = False
         self.__send_buf = deque()
+        self.closed = asyncio.Event()
 
         self._loop.add_reader(self._udp_sock_fd, self.__read_udp)
+        self._loop.call_later(0.5, self.__check_for_timeouts)
 
     def __sendto_cb(self, cb, ctx, sock, data, addr, flags):
         self.__send_buf.append((data, addr))
@@ -192,21 +203,9 @@ class UtpServer:
             self.__writing = True
 
     def __state_change_cb(self, cb, ctx, sock, state):
-        transport = self.__get_transport(sock)
-        transport._UtpTransport__state_change_cb(cb, ctx, sock, state)
-        return
-        proto = transport._protocol
-
-        if state in (utp.UTP_STATE_CONNECT, utp.UTP_STATE_WRITABLE):
-            pass
-        elif state == utp.UTP_STATE_EOF:
-            self._loop.call_soon(proto.eof_received)
-            transport.close()
-        elif state == utp.UTP_STATE_DESTROYING:
-            transport.__closing = False
-            transport.__closed = True
-        else:
-            raise RuntimeError('Encountered unknown UTP state: {}', state)
+        if self.transports or self.__closing_transports:
+            transport = self.__get_transport(sock)
+            transport._UtpTransport__state_change_cb(cb, ctx, sock, state)
 
     def __error_cb(self, cb, ctx, sock, error_code):
         transport = self.__get_transport(sock)
@@ -228,7 +227,7 @@ class UtpServer:
         proto = self._proto_factory()
         transport = UtpTransport(self._loop, proto, addr[0], addr[1],
                                  (self._bind_host, self._bind_port),
-                                 sock)
+                                 sock, self.__ctx, self)
         self._loop.call_soon(proto.connection_made, transport)
         self.transports.append(transport)
 
@@ -256,14 +255,34 @@ class UtpServer:
         self._loop.remove_writer(self._udp_sock_fd)
         self.__writing = False
 
+    def __check_for_timeouts(self):
+        if self.closed.is_set():
+            return
+
+        utp.utp_check_timeouts(self.__ctx)
+        self._loop.call_later(0.5, self.__check_for_timeouts)
+
     def __get_transport(self, sock):
-        t = [t for t in self.transports if t.get_extra_info('socket') == sock]
+        transports = self.transports if self.transports is not None \
+                     else self.__closing_transports
+        t = [t for t in transports if t.get_extra_info('socket') == sock]
         if not t:
             raise RuntimeError('Encountered unknown socket.')
         if len(t) > 1:
             raise RuntimeError('More than one transport for one socket.')
 
         return t[0]
+
+    def _transport_closed(self, transport):
+        if self.transports:
+            del self.transports[self.transports.index(transport)]
+        else:
+            del self.__closing_transports[self.__closing_transports.index(transport)]
+            if len(self.__closing_transports) == 0:
+                self.closed.set()
+
+    def __del__(self):
+        utp.utp_destroy(self.__ctx)
 
     @property
     def sockets(self):
@@ -279,7 +298,14 @@ class UtpServer:
         for t in self.transports:
             t.close()
 
+        self.__closing_transports = self.transports
         self.transports = None
+
+        if not self.__closing_transports:
+            self.closed.set()
+
+    async def wait_closed(self):
+        await self.closed.wait()
 
 async def create_connection(protocol_factory, host=None, port=None, local_addr=None, loop=None):
     if loop is None:
