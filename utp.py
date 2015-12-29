@@ -109,8 +109,7 @@ def utp_callback(a):
     try:
         ret = int(ret)
     except TypeError:
-        raise RuntimeError('UTP callback should return an integer not {}.'
-                           .format(orig_type))
+        ret = 0
 
     return ret
 
