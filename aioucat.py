@@ -90,15 +90,20 @@ async def run(loop, args):
             writer.close()
             return
 
+        host, port = reader._transport.get_extra_info('sockname')
+        logger.info('Accepted connection from {}:{}'.format(host, port))
+
         accepted = True
         await ucat(reader, writer)
 
     if listen_mode:
         server = await aioutp.start_server(connected_cb,
-                                           args.bind_address, args.listen)
+                                           args.bind_address, args.listen,
+                                           debug=args.debug)
     else:
         reader, writer = await aioutp.open_connection(
-            args.dest_host, args.dest_port)
+            args.dest_host, args.dest_port,
+            debug=args.debug)
         await ucat(reader, writer)
 
 def main():
@@ -155,6 +160,7 @@ def main():
         'debug': logging.DEBUG
     }[args.log_level.lower()]
 
+    utp_logger = logging.getLogger('aioutp')
     logger = logging.getLogger('aioucat')
     formatter = logging.Formatter(
         '%(asctime) -15s - %(levelname) -8s - %(message)s')
@@ -164,14 +170,17 @@ def main():
         handler.setFormatter(formatter)
         handler.setLevel(log_level)
         logger.addHandler(handler)
+        utp_logger.addHandler(handler)
 
     if args.log_to_stdout:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(formatter)
         handler.setLevel(log_level)
         logger.addHandler(handler)
+        utp_logger.addHandler(handler)
 
     logger.setLevel(log_level)
+    utp_logger.setLevel(log_level)
 
     keep_running = True
     loop = asyncio.get_event_loop()

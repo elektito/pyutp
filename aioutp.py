@@ -1,10 +1,13 @@
 import asyncio
 import socket
+import logging
 import utp
 from collections import deque
 
 class UtpTransport(asyncio.Transport):
-    def __init__(self, loop, protocol, host, port, local_addr=None, sock=None, ctx=None, server=None):
+    def __init__(self, loop, protocol, host, port, local_addr=None,
+                 sock=None, ctx=None, server=None, debug=False):
+        self.logger = logging.getLogger('aioutp')
         self._loop = loop
         self._protocol = protocol
         self._peername = (host, port)
@@ -36,6 +39,12 @@ class UtpTransport(asyncio.Transport):
                                  self.__state_change_cb)
             utp.utp_set_callback(self.__ctx, utp.UTP_ON_ERROR, self.__error_cb)
             utp.utp_set_callback(self.__ctx, utp.UTP_ON_READ, self.__read_cb)
+            utp.utp_set_callback(self.__ctx, utp.UTP_LOG, self.__log_cb)
+
+            if debug:
+                utp.utp_context_set_option(self.__ctx, utp.UTP_LOG_NORMAL, 1)
+                utp.utp_context_set_option(self.__ctx, utp.UTP_LOG_DEBUG, 1)
+                utp.utp_context_set_option(self.__ctx, utp.UTP_LOG_MTU, 1)
 
             self.__sock = utp.utp_create_socket(self.__ctx)
             ret = utp.utp_connect(self.__sock, (host, port))
@@ -84,6 +93,9 @@ class UtpTransport(asyncio.Transport):
     def __read_cb(self, cb, ctx, sock, data):
         self._loop.call_soon(self._protocol.data_received, data)
         utp.utp_read_drained(self.__sock)
+
+    def __log_cb(self, cb, ctx, sock, msg):
+        self.logger.debug('UTP log: {}'.format(msg.decode()))
 
     def __read_udp(self):
         drained = False
@@ -163,7 +175,9 @@ class UtpTransport(asyncio.Transport):
         await self.closed.wait()
 
 class UtpServer:
-    def __init__(self, proto_factory, loop, bind_host, bind_port):
+    def __init__(self, proto_factory, loop, bind_host, bind_port, debug=False):
+        self.logger = logging.getLogger('aioutp')
+        self.__debug = debug
         self.transports = []
         self._proto_factory = proto_factory
         self._loop = loop
@@ -188,6 +202,12 @@ class UtpServer:
         utp.utp_set_callback(self.__ctx, utp.UTP_ON_ERROR, self.__error_cb)
         utp.utp_set_callback(self.__ctx, utp.UTP_ON_READ, self.__read_cb)
         utp.utp_set_callback(self.__ctx, utp.UTP_ON_ACCEPT, self.__accept_cb)
+        utp.utp_set_callback(self.__ctx, utp.UTP_LOG, self.__log_cb)
+
+        if debug:
+            utp.utp_context_set_option(self.__ctx, utp.UTP_LOG_NORMAL, 1)
+            utp.utp_context_set_option(self.__ctx, utp.UTP_LOG_DEBUG, 1)
+            utp.utp_context_set_option(self.__ctx, utp.UTP_LOG_MTU, 1)
 
         self.__writing = False
         self.__send_buf = deque()
@@ -227,9 +247,12 @@ class UtpServer:
         proto = self._proto_factory()
         transport = UtpTransport(self._loop, proto, addr[0], addr[1],
                                  (self._bind_host, self._bind_port),
-                                 sock, self.__ctx, self)
+                                 sock, self.__ctx, self, debug=self.__debug)
         self._loop.call_soon(proto.connection_made, transport)
         self.transports.append(transport)
+
+    def __log_cb(self, cb, ctx, sock, msg):
+        self.logger.debug('UTP log: {}'.format(msg.decode()))
 
     def __read_udp(self):
         drained = False
@@ -340,16 +363,17 @@ class StreamReaderProtocol(asyncio.Protocol):
         self._stream_reader.feed_eof()
         return True
 
-async def create_connection(protocol_factory, host=None, port=None, local_addr=None, loop=None):
+async def create_connection(protocol_factory, host=None, port=None,
+                            local_addr=None, loop=None, debug=False):
     if loop is None:
         loop = asyncio.get_event_loop()
 
     proto = protocol_factory()
-    transport = UtpTransport(loop, proto, host, port, local_addr)
+    transport = UtpTransport(loop, proto, host, port, local_addr, debug=debug)
     return transport, proto
 
 async def open_connection(host=None, port=None, local_addr=None,
-                          limit=None, loop=None):
+                          limit=None, loop=None, debug=False):
     if loop is None:
         loop = asyncio.get_event_loop()
 
@@ -361,7 +385,8 @@ async def open_connection(host=None, port=None, local_addr=None,
     protocol = StreamReaderProtocol(
         reader, loop=loop)
     transport, _ = await create_connection(
-        lambda: protocol, host, port, local_addr=local_addr, loop=loop)
+        lambda: protocol, host, port, local_addr=local_addr,
+        loop=loop, debug=debug)
     writer = asyncio.StreamWriter(transport, protocol, reader, loop)
 
     # Wait for the connection to establish. This is not done in
@@ -374,15 +399,16 @@ async def open_connection(host=None, port=None, local_addr=None,
 
     return reader, writer
 
-async def create_server(protocol_factory, host=None, port=None, loop=None):
+async def create_server(protocol_factory, host=None, port=None,
+                        loop=None, debug=False):
     if loop is None:
         loop = asyncio.get_event_loop()
 
-    server = UtpServer(protocol_factory, loop, host, port)
+    server = UtpServer(protocol_factory, loop, host, port, debug=debug)
     return server
 
 async def start_server(client_connected_cb, host=None, port=None,
-                       limit=None, loop=None):
+                       limit=None, loop=None, debug=False):
     if loop is None:
         loop = asyncio.get_event_loop()
 
@@ -395,4 +421,4 @@ async def start_server(client_connected_cb, host=None, port=None,
                                         loop=loop)
         return protocol
 
-    return await create_server(factory, host, port, loop)
+    return await create_server(factory, host, port, loop, debug=debug)
