@@ -1,6 +1,6 @@
 import ctypes
 import socket
-from ctypes import cdll, c_int, c_void_p, c_uint, c_uint32, c_uint64, c_size_t, c_char, c_char_p, POINTER, CFUNCTYPE
+from ctypes import cdll, c_int, c_void_p, c_uint, c_uint32, c_uint64, c_size_t, c_ssize_t, c_char, c_char_p, POINTER, CFUNCTYPE
 from sockaddr import to_sockaddr, from_sockaddr, sockaddr_in
 
 # callbacks
@@ -35,12 +35,6 @@ UTP_SNDBUF = 19
 UTP_RCVBUF = 20
 UTP_TARGET_DELAY = 21
 
-class UtpContext(ctypes.Structure):
-    pass
-
-class UtpSocket(ctypes.Structure):
-    pass
-
 class UtpCallbackArgs(ctypes.Structure):
     class _U1(ctypes.Union):
         _fields_ = [('address', POINTER(sockaddr_in)),
@@ -52,12 +46,11 @@ class UtpCallbackArgs(ctypes.Structure):
         _fields_ = [('address_len', c_uint32),
                     ('type', c_int)]
     _anonymous_ = ('anon1', 'anon2')
-    _fields_ = [('context', POINTER(UtpContext)),
-                ('socket', POINTER(UtpSocket)),
+    _fields_ = [('context', c_void_p),
+                ('socket', c_void_p),
                 ('len', c_size_t),
                 ('flags', c_uint32),
                 ('callback_type', c_int),
-                #('buf', c_char_p),
                 ('buf', POINTER(c_char)),
                 ('anon1', _U1),
                 ('anon2', _U2)]
@@ -122,25 +115,37 @@ def utp_callback(a):
     return ret
 
 # utp_context *utp_init(int version);
+libutp.utp_init.argtypes = [c_int]
+libutp.utp_init.restype = c_void_p
 def utp_init(version):
     return libutp.utp_init(version)
 
 # void utp_destroy(utp_context *ctx);
+libutp.utp_destroy.argtypes = [c_void_p]
 def utp_destroy(ctx):
     libutp.utp_destroy(ctx)
 
 # void utp_set_callback(utp_context *ctx, int callback_type,
 #                       utp_callback_t *proc);
+libutp.utp_set_callback.argtypes = [c_void_p, c_int, CBFUNC]
 def utp_set_callback(ctx, callback_type, func):
     user_callbacks[callback_type] = func
     libutp.utp_set_callback(ctx, callback_type, utp_callback)
 
 # utp_socket *utp_create_socket(utp_context *ctx);
+libutp.utp_create_socket.argtypes = [c_void_p]
+libutp.utp_create_socket.restype = c_void_p
 def utp_create_socket(ctx):
     return libutp.utp_create_socket(ctx)
 
 # int utp_process_udp(utp_context *ctx, const byte *buf, size_t len,
 #                     const struct sockaddr *to, socklen_t tolen);
+libutp.utp_process_udp.argtypes = [c_void_p,
+                                   POINTER(c_char),
+                                   c_size_t,
+                                   POINTER(sockaddr_in),
+                                   c_int]
+libutp.utp_process_udp.restype = c_int
 def utp_process_udp(ctx, data, addr):
     addr, addrlen = to_sockaddr(socket.AF_INET, addr)
     return libutp.utp_process_udp(ctx,
@@ -148,30 +153,40 @@ def utp_process_udp(ctx, data, addr):
                                   ctypes.byref(addr), addrlen)
 
 # void utp_issue_deferred_acks(utp_context *ctx);
+libutp.utp_issue_deferred_acks.argtypes = [c_void_p]
 def utp_issue_deferred_acks(ctx):
     libutp.utp_issue_deferred_acks(ctx)
 
 # void utp_check_timeouts(utp_context *ctx);
+libutp.utp_check_timeouts.argtypes = [c_void_p]
 def utp_check_timeouts(ctx):
     libutp.utp_check_timeouts(ctx)
 
 # int utp_context_set_option(utp_context *ctx, int opt, int val);
+libutp.utp_context_set_option.argtypes = [c_void_p, c_int, c_int]
+libutp.utp_context_set_option.restype = c_int
 def utp_context_set_option(ctx, opt, val):
     libutp.utp_context_set_option(ctx, opt, val)
 
 # int utp_connect(utp_socket *s, const struct sockaddr *to, socklen_t tolen);
+libutp.utp_connect.argtypes = [c_void_p, POINTER(sockaddr_in), c_int]
+libutp.utp_connect.restype = c_int
 def utp_connect(sock, dst):
     addr, addrlen = to_sockaddr(socket.AF_INET, dst)
     return libutp.utp_connect(sock, ctypes.byref(addr), addrlen)
 
 # ssize_t utp_write(utp_socket *s, void *buf, size_t count);
+libutp.utp_write.argtypes = [c_void_p, c_void_p, c_size_t]
+libutp.utp_write.restype = c_ssize_t
 def utp_write(sock, buf):
     return libutp.utp_write(sock, buf, len(buf))
 
 # void utp_read_drained(utp_socket *s);
+libutp.utp_read_drained.argtypes = [c_void_p]
 def utp_read_drained(sock):
     libutp.utp_read_drained(sock)
 
 # void utp_close(utp_socket *s);
+libutp.utp_close.argtypes = [c_void_p]
 def utp_close(sock):
     libutp.utp_close(sock)
