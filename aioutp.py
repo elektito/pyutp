@@ -307,6 +307,39 @@ class UtpServer:
     async def wait_closed(self):
         await self.closed.wait()
 
+class StreamReaderProtocol(asyncio.Protocol):
+    def __init__(self, stream_reader, client_connected_cb=None, loop=None):
+        self._loop = loop
+        self._stream_reader = stream_reader
+        self._stream_writer = None
+        self._client_connected_cb = client_connected_cb
+        self._connection_made = asyncio.Event()
+
+    def connection_made(self, transport):
+        self._stream_reader.set_transport(transport)
+        if self._client_connected_cb is not None:
+            self._stream_writer = asyncio.StreamWriter(transport, self,
+                                               self._stream_reader,
+                                               self._loop)
+            res = self._client_connected_cb(self._stream_reader,
+                                            self._stream_writer)
+            if asyncio.iscoroutine(res):
+                self._loop.create_task(res)
+        self._connection_made.set()
+
+    def connection_lost(self, exc):
+        if exc is None:
+            self._stream_reader.feed_eof()
+        else:
+            self._stream_reader.set_exception(exc)
+
+    def data_received(self, data):
+        self._stream_reader.feed_data(data)
+
+    def eof_received(self):
+        self._stream_reader.feed_eof()
+        return True
+
 async def create_connection(protocol_factory, host=None, port=None, local_addr=None, loop=None):
     if loop is None:
         loop = asyncio.get_event_loop()
@@ -315,8 +348,31 @@ async def create_connection(protocol_factory, host=None, port=None, local_addr=N
     transport = UtpTransport(loop, proto, host, port, local_addr)
     return transport, proto
 
-async def open_connection(host=None, port=None):
-    pass
+async def open_connection(host=None, port=None, local_addr=None,
+                          limit=None, loop=None):
+    if loop is None:
+        loop = asyncio.get_event_loop()
+
+    if limit is None:
+        reader = asyncio.StreamReader(loop=loop)
+    else:
+        reader = asyncio.StreamReader(limit=limit, loop=loop)
+
+    protocol = StreamReaderProtocol(
+        reader, loop=loop)
+    transport, _ = await create_connection(
+        lambda: protocol, host, port, local_addr=local_addr, loop=loop)
+    writer = asyncio.StreamWriter(transport, protocol, reader, loop)
+
+    # Wait for the connection to establish. This is not done in
+    # asyncio's open_connection, but we need to do it because a UTP
+    # connection is not considered established unless the client has
+    # sent some data to the server and to make sure the client can
+    # immediately write data to the writer, we'll wait for the
+    # connection to establish.
+    await protocol._connection_made.wait()
+
+    return reader, writer
 
 async def create_server(protocol_factory, host=None, port=None, loop=None):
     if loop is None:
@@ -325,5 +381,18 @@ async def create_server(protocol_factory, host=None, port=None, loop=None):
     server = UtpServer(protocol_factory, loop, host, port)
     return server
 
-async def start_server(client_connected_cb, host=None, port=None):
-    pass
+async def start_server(client_connected_cb, host=None, port=None,
+                       limit=None, loop=None):
+    if loop is None:
+        loop = asyncio.get_event_loop()
+
+    def factory():
+        if limit is None:
+            reader = asyncio.StreamReader(loop=loop)
+        else:
+            reader = asyncio.StreamReader(limit=limit, loop=loop)
+        protocol = StreamReaderProtocol(reader, client_connected_cb,
+                                        loop=loop)
+        return protocol
+
+    return await create_server(factory, host, port, loop)
