@@ -4,13 +4,11 @@ import utp
 from collections import deque
 
 class UtpTransport(asyncio.Transport):
-    def __init__(self, loop, protocol, host, port, local_addr=None):
+    def __init__(self, loop, protocol, host, port, local_addr=None, sock=None, ctx=None):
         self._loop = loop
         self._protocol = protocol
         self._peername = (host, port)
-        self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._udp_sock.setblocking(0)
-        self._udp_sock_fd = self._udp_sock.fileno()
+        self._local_addr = local_addr
 
         self.__writable = False
         self.__closing = False
@@ -20,25 +18,35 @@ class UtpTransport(asyncio.Transport):
         self.__writing = False
         self.__send_buf = deque()
 
-        if local_addr == None:
-            self._udp_sock.bind(('127.0.0.1', 0))
+        if sock is None:
+            self.__external_sock = False
+            self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._udp_sock.setblocking(0)
+            self._udp_sock_fd = self._udp_sock.fileno()
+
+            if local_addr == None:
+                self._udp_sock.bind(('127.0.0.1', 0))
+            else:
+                self._udp_sock.bind(localaddr)
+
+            self.__ctx = utp.utp_init(2)
+
+            utp.utp_set_callback(self.__ctx, utp.UTP_SENDTO, self.__sendto_cb)
+            utp.utp_set_callback(self.__ctx, utp.UTP_ON_STATE_CHANGE,
+                                 self.__state_change_cb)
+            utp.utp_set_callback(self.__ctx, utp.UTP_ON_ERROR, self.__error_cb)
+            utp.utp_set_callback(self.__ctx, utp.UTP_ON_READ, self.__read_cb)
+
+            self.__sock = utp.utp_create_socket(self.__ctx)
+            ret = utp.utp_connect(self.__sock, (host, port))
+            if ret != 0:
+                raise RuntimeError('Could not establish UTP connection.')
+
+            self._loop.add_reader(self._udp_sock_fd, self.__read_udp)
         else:
-            self._udp_sock.bind(localaddr)
-
-        self.__ctx = utp.utp_init(2)
-
-        utp.utp_set_callback(self.__ctx, utp.UTP_SENDTO, self.__sendto_cb)
-        utp.utp_set_callback(self.__ctx, utp.UTP_ON_STATE_CHANGE,
-                             self.__state_change_cb)
-        utp.utp_set_callback(self.__ctx, utp.UTP_ON_ERROR, self.__error_cb)
-        utp.utp_set_callback(self.__ctx, utp.UTP_ON_READ, self.__read_cb)
-
-        self.__sock = utp.utp_create_socket(self.__ctx)
-        ret = utp.utp_connect(self.__sock, (host, port))
-        if ret != 0:
-            raise RuntimeError('Could not establish UTP connection.')
-
-        self._loop.add_reader(self._udp_sock_fd, self.__read_udp)
+            self.__sock = sock
+            self.__ctx = ctx
+            self.__external_sock = True
 
     def __sendto_cb(self, cb, ctx, sock, data, addr, flags):
         self.__send_buf.append(data)
@@ -106,7 +114,8 @@ class UtpTransport(asyncio.Transport):
         utp.utp_close(self.__sock)
         self._loop.call_soon(self._protocol.connection_lost,
                              self.__close_exception)
-        self._loop.remove_reader(self._udp_sock_fd)
+        if not self.__external_sock:
+            self._loop.remove_reader(self._udp_sock_fd)
 
     def is_closing(self):
         return self.__closing
@@ -115,7 +124,7 @@ class UtpTransport(asyncio.Transport):
         return {
             'peername': self._peername,
             'socket': self.__sock,
-            'sockname': self._udp_sock.getsockname()
+            'sockname': self._local_addr
         }.get(name, default)
 
     def pause_reading(self):
@@ -144,6 +153,134 @@ class UtpTransport(asyncio.Transport):
         self._loop.call_soon(self._protocol.connection_lost, None)
         self.closed = False
 
+class UtpServer:
+    def __init__(self, proto_factory, loop, bind_host, bind_port):
+        self.transports = []
+        self._proto_factory = proto_factory
+        self._loop = loop
+        self._bind_host = bind_host
+        self._bind_port = bind_port
+        self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._udp_sock.setblocking(0)
+        self._udp_sock_fd = self._udp_sock.fileno()
+
+        if bind_host is None:
+            bind_host = '127.0.0.1'
+        if bind_port is None:
+            bind_port = 0
+
+        self._udp_sock.bind((bind_host, bind_port))
+
+        self.__ctx = utp.utp_init(2)
+
+        utp.utp_set_callback(self.__ctx, utp.UTP_SENDTO, self.__sendto_cb)
+        utp.utp_set_callback(self.__ctx, utp.UTP_ON_STATE_CHANGE,
+                             self.__state_change_cb)
+        utp.utp_set_callback(self.__ctx, utp.UTP_ON_ERROR, self.__error_cb)
+        utp.utp_set_callback(self.__ctx, utp.UTP_ON_READ, self.__read_cb)
+        utp.utp_set_callback(self.__ctx, utp.UTP_ON_ACCEPT, self.__accept_cb)
+
+        self.__writing = False
+        self.__send_buf = deque()
+
+        self._loop.add_reader(self._udp_sock_fd, self.__read_udp)
+
+    def __sendto_cb(self, cb, ctx, sock, data, addr, flags):
+        self.__send_buf.append((data, addr))
+        if not self.__writing:
+            self._loop.add_writer(self._udp_sock_fd, self.__write_udp)
+            self.__writing = True
+
+    def __state_change_cb(self, cb, ctx, sock, state):
+        transport = self.__get_transport(sock)
+        transport._UtpTransport__state_change_cb(cb, ctx, sock, state)
+        return
+        proto = transport._protocol
+
+        if state in (utp.UTP_STATE_CONNECT, utp.UTP_STATE_WRITABLE):
+            pass
+        elif state == utp.UTP_STATE_EOF:
+            self._loop.call_soon(proto.eof_received)
+            transport.close()
+        elif state == utp.UTP_STATE_DESTROYING:
+            transport.__closing = False
+            transport.__closed = True
+        else:
+            raise RuntimeError('Encountered unknown UTP state: {}', state)
+
+    def __error_cb(self, cb, ctx, sock, error_code):
+        transport = self.__get_transport(sock)
+        proto = transport._protocol
+        transport.__close_exception = RuntimeError(
+            'UTP Error: {}'.format(error_code))
+        transport.close()
+
+    def __read_cb(self, cb, ctx, sock, data):
+        transport = self.__get_transport(sock)
+        proto = transport._protocol
+        self._loop.call_soon(proto.data_received, data)
+        utp.utp_read_drained(sock)
+
+    def __accept_cb(self, cb, ctx, sock, addr):
+        if self.sockets is None:
+            raise RuntimeError('Connection arrived on closed server.')
+
+        proto = self._proto_factory()
+        transport = UtpTransport(self._loop, proto, addr[0], addr[1],
+                                 (self._bind_host, self._bind_port),
+                                 sock)
+        self._loop.call_soon(proto.connection_made, transport)
+        self.transports.append(transport)
+
+    def __read_udp(self):
+        drained = False
+        while not drained:
+            try:
+                data, addr = self._udp_sock.recvfrom(1500, socket.MSG_DONTWAIT)
+            except socket.error as e:
+                if e.errno == socket.EAGAIN or e.errno == socket.EWOULDBLOCK:
+                    utp.utp_issue_deferred_acks(self.__ctx)
+                    drained = True
+                else:
+                    raise e
+            else:
+                utp.utp_process_udp(self.__ctx, data, addr)
+
+    def __write_udp(self):
+        while len(self.__send_buf) != 0:
+            data, peer = self.__send_buf.pop()
+            sent = self._udp_sock.sendto(data, peer)
+            if sent < len(data):
+                raise RuntimeError('Could not send datagram.')
+
+        self._loop.remove_writer(self._udp_sock_fd)
+        self.__writing = False
+
+    def __get_transport(self, sock):
+        t = [t for t in self.transports if t.get_extra_info('socket') == sock]
+        if not t:
+            raise RuntimeError('Encountered unknown socket.')
+        if len(t) > 1:
+            raise RuntimeError('More than one transport for one socket.')
+
+        return t[0]
+
+    @property
+    def sockets(self):
+        if self.transports is None:
+            return None
+        else:
+            return [t.get_extra_info('socket') for t in self.transports]
+
+    def close(self):
+        if self.transports is None:
+            return
+
+        for t in self.transports:
+            t.close()
+
+        self.transports = None
+
 async def create_connection(protocol_factory, host=None, port=None, local_addr=None, loop=None):
     if loop is None:
         loop = asyncio.get_event_loop()
@@ -155,8 +292,12 @@ async def create_connection(protocol_factory, host=None, port=None, local_addr=N
 async def open_connection(host=None, port=None):
     pass
 
-async def create_server(protocol_factory, host=None, port=None):
-    pass
+async def create_server(protocol_factory, host=None, port=None, loop=None):
+    if loop is None:
+        loop = asyncio.get_event_loop()
+
+    server = UtpServer(protocol_factory, loop, host, port)
+    return server
 
 async def start_server(client_connected_cb, host=None, port=None):
     pass
