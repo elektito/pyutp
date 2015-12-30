@@ -35,6 +35,11 @@ UTP_SNDBUF = 19
 UTP_RCVBUF = 20
 UTP_TARGET_DELAY = 21
 
+# errors
+UTP_ECONNREFUSED = 0,
+UTP_ECONNRESET = 1
+UTP_ETIMEDOUT = 2
+
 class UtpCallbackArgs(ctypes.Structure):
     class _U1(ctypes.Union):
         _fields_ = [('address', POINTER(sockaddr_in)),
