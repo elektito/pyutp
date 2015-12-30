@@ -1,8 +1,10 @@
 import socket
 import ctypes
+import struct
 
 # the following sockaddr related code is taken from
 # https://www.osso.nl/blog/python-ctypes-socket-datagram/
+# with some fixes
 
 def SUN_LEN(path):
     """For AF_UNIX the addrlen is *not* sizeof(struct sockaddr_un)"""
@@ -46,11 +48,16 @@ def to_sockaddr(family, address=None):
 
     return addr, addrlen
 
+def signed_to_unsigned(byte):
+    '''Convert a C "singed char" integer to an unsigned char.'''
+    return struct.unpack('B', struct.pack('b', byte))[0]
+
 def from_sockaddr(sockaddr):
     if sockaddr.sa_family == socket.AF_UNIX:
         return sockaddr.sun_path
     elif sockaddr.sa_family == socket.AF_INET:
-        return ('%d.%d.%d.%d' % tuple(sockaddr.sin_addr),
+        addr = tuple(signed_to_unsigned(c) for c in sockaddr.sin_addr)
+        return ('%d.%d.%d.%d' % addr,
                 socket.ntohs(sockaddr.sin_port))
     raise NotImplementedError('Not implemented family %s' %
                               (sockaddr.sa_family,))
